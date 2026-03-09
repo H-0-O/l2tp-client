@@ -3,6 +3,7 @@ module github.com/l2tww/l2tp-client
 go 1.21
 
 require (
+	github.com/go-kit/kit v0.13.0
 	github.com/katalix/go-l2tp v0.1.8
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/viper v1.18.2
@@ -10,7 +11,6 @@ require (
 
 require (
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
-	github.com/go-kit/kit v0.13.0 // indirect
 	github.com/go-kit/log v0.2.1 // indirect
 	github.com/go-logfmt/logfmt v0.6.0 // indirect
 	github.com/google/go-cmp v0.5.9 // indirect

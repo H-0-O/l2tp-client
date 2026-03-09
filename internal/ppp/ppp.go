@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // PPPConfig holds configuration for pppd
@@ -55,12 +56,6 @@ func (p *PPPManager) Start() error {
 	}
 	p.optionsFile = optionsFile
 
-	// Use the pty path from the L2TP session
-	ptyScript := p.ptyPath
-	if p.config.PtyScript != "" {
-		ptyScript = p.config.PtyScript
-	}
-
 	// Build pppd command
 	args := []string{
 		"nodetach",
@@ -70,15 +65,23 @@ func (p *PPPManager) Start() error {
 		"password", p.config.Password,
 	}
 
-	// Add authentication method
-	switch strings.ToLower(p.config.AuthMethod) {
-	case "pap":
-		args = append(args, "require-pap")
-	case "chap":
-		args = append(args, "require-chap")
-	case "mschap", "mschapv2":
-		args = append(args, "require-mschap-v2")
+	// If p.ptyPath looks like a PPP device (pppN), use it as the device
+	// Otherwise, use pty with the script/command
+	if p.ptyPath != "" && strings.HasPrefix(p.ptyPath, "ppp") && len(p.ptyPath) > 3 {
+		// Looks like a PPP device name, use it directly (prepend to args)
+		args = append([]string{p.ptyPath}, args...)
+	} else {
+		// Use pty with a placeholder command
+		ptyCmd := "echo 'L2TP PPP placeholder'"
+		if p.ptyPath != "" {
+			ptyCmd = p.ptyPath
+		}
+		args = append(args, "pty", ptyCmd)
 	}
+
+	// For L2TP client, we authenticate to the server using user/password
+	// We don't require the server to authenticate to us (noauth handles that)
+	// The auth method config is used at the L2TP level, not PPP level
 
 	// Add interface name if specified
 	if p.config.Interface != "" {
@@ -92,9 +95,6 @@ func (p *PPPManager) Start() error {
 	if p.config.IPv6 {
 		args = append(args, "+ipv6", "ipv6cp-use-ipaddr")
 	}
-
-	// Add pty - pppd will connect to the L2TP tunnel via this pty
-	args = append(args, ptyScript)
 
 	// Add options file if specified
 	if p.config.OptionsFile != "" {
@@ -126,8 +126,19 @@ func (p *PPPManager) Stop() error {
 		}
 	}
 
-	// Wait for process to exit
-	_ = p.cmd.Wait()
+	// Wait for process to exit with timeout so we don't block forever on unresponsive pppd
+	done := make(chan struct{})
+	go func() {
+		_ = p.cmd.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		_ = p.cmd.Process.Kill()
+		<-done
+	}
+	p.cmd = nil
 
 	// Clean up files
 	p.cleanup()

@@ -1,0 +1,11 @@
+server = "87.107.110.99"
+port = 1701
+username = "majid.m"
+password = "2576"
+auth = "pap"
+interface = "ppp0"
+ipv4 = true
+ipv6 = false
+auto-reconnect = true
+reconnect-delay = 5
+hello-timeout = 60
