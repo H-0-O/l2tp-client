@@ -1,0 +1,33 @@
+# Example L2TP Client Configuration File
+# Copy this file and modify as needed
+
+# L2TP server address (hostname or IP)
+server = "vpn.example.com"
+
+# L2TP server port (default: 1701)
+port = 1701
+
+# Authentication credentials
+username = "your-username"
+password = "your-password"
+
+# Authentication method: pap, chap, mschap, mschapv2
+auth = "pap"
+
+# Network interface name (optional)
+# interface = "ppp0"
+
+# Enable IPv4 (default: true)
+ipv4 = true
+
+# Enable IPv6 (default: false)
+ipv6 = false
+
+# Automatically reconnect on failure (default: false)
+auto-reconnect = false
+
+# Delay in seconds before reconnecting (default: 5)
+reconnect-delay = 5
+
+# L2TP hello timeout in seconds (default: 60)
+hello-timeout = 60
