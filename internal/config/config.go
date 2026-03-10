@@ -11,30 +11,32 @@ import (
 
 // Config holds the L2TP client configuration
 type Config struct {
-	Server      string
-	Port        int
-	Username    string
-	Password    string
-	AuthMethod  string
-	Interface   string
-	IPv4        bool
-	IPv6        bool
-	AutoReconnect bool
-	ReconnectDelay int
-	HelloTimeout   int
-	ConfigFile     string
+	Server           string
+	Port             int
+	Username         string
+	Password         string
+	AuthMethod       string
+	Interface        string
+	IPv4             bool
+	IPv6             bool
+	AutoReconnect    bool
+	ReconnectDelay   int
+	HelloTimeout     int
+	CreatePPPInterface bool // if false, skip creating real PPPoL2TP device and use pty fallback
+	ConfigFile       string
 }
 
 // DefaultConfig returns a configuration with default values
 func DefaultConfig() *Config {
 	return &Config{
-		Port:          1701,
-		AuthMethod:    "pap",
-		IPv4:          true,
-		IPv6:          false,
-		AutoReconnect: false,
-		ReconnectDelay: 5,
-		HelloTimeout:   60,
+		Port:              1701,
+		AuthMethod:        "pap",
+		IPv4:              true,
+		IPv6:              false,
+		AutoReconnect:     false,
+		ReconnectDelay:    5,
+		HelloTimeout:      60,
+		CreatePPPInterface: true,
 	}
 }
 
@@ -93,6 +95,13 @@ func LoadConfig() (*Config, error) {
 	}
 	if viper.IsSet("hello-timeout") {
 		cfg.HelloTimeout = viper.GetInt("hello-timeout")
+	}
+	// Allow opting out of creating a real PPP interface over L2TP.
+	// Config key: create-ppp-interface (flags/env) or create_ppp_interface (config file).
+	if viper.IsSet("create-ppp-interface") {
+		cfg.CreatePPPInterface = viper.GetBool("create-ppp-interface")
+	} else if viper.IsSet("create_ppp_interface") {
+		cfg.CreatePPPInterface = viper.GetBool("create_ppp_interface")
 	}
 
 	return cfg, nil

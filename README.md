@@ -29,8 +29,31 @@ sudo modprobe l2tp_core l2tp_netlink l2tp_eth l2tp_ip l2tp_ip6
 
 ## Installation
 
+### From release (no Go or internet on server)
+
+Build the release once on a machine with Go and network, then copy the tarball to the server:
+
+**On a build machine** (with go-l2tp clone at path in go.mod replace):
+```bash
+cd l2tp-client
+make release
+# Creates dist/l2tp-client-0.1.0-linux-amd64.tar.gz
+```
+
+**On the server (no Go, no internet):** copy the tarball (e.g. with scp), then:
+```bash
+tar -xzf l2tp-client-0.1.0-linux-amd64.tar.gz
+cd l2tp-client-0.1.0-linux-amd64
+sudo cp l2tp-client /usr/local/bin/
+# Edit config, then:
+sudo l2tp-client connect --config your-config.toml
+```
+
+The binary is static (CGO_ENABLED=0). The server only needs Linux with L2TP kernel modules and `pppd` installed.
+
 ### From Source
 
+**Quick build (no PPP-over-L2TP; tunnel only):**
 ```bash
 git clone https://github.com/l2tww/l2tp-client.git
 cd l2tp-client
@@ -38,6 +61,14 @@ go mod download
 go build -o l2tp-client ./cmd/l2tp-client
 sudo cp l2tp-client /usr/local/bin/
 ```
+
+**Build with local go-l2tp** (clone go-l2tp next to this repo, apply the FD patch there, then):
+```bash
+cd l2tp-client
+make build
+sudo cp l2tp-client /usr/local/bin/
+```
+See `go.mod` for the `replace` path; put your go-l2tp clone at that path (e.g. `../go-l2tp`).
 
 ## Usage
 

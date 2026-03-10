@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"reflect"
 	"strconv"
 	"strings"
@@ -108,6 +109,30 @@ func toUint32(v interface{}) uint32 {
 	return 0
 }
 
+// eventHandler captures peer tunnel/session IDs from library events for PPPoL2TP.
+type eventHandler struct {
+	client *Client
+}
+
+func (h *eventHandler) HandleEvent(event interface{}) {
+	switch e := event.(type) {
+	case *l2tp.TunnelUpEvent:
+		if e.Config != nil && e.Config.PeerTunnelID != 0 {
+			h.client.mu.Lock()
+			h.client.status.RemoteTunnelID = uint32(e.Config.PeerTunnelID)
+			h.client.mu.Unlock()
+			log.Printf("Captured PeerTunnelID from event: %d", e.Config.PeerTunnelID)
+		}
+	case *l2tp.SessionUpEvent:
+		if e.SessionConfig != nil && e.SessionConfig.PeerSessionID != 0 {
+			h.client.mu.Lock()
+			h.client.status.RemoteSessionID = uint32(e.SessionConfig.PeerSessionID)
+			h.client.mu.Unlock()
+			log.Printf("Captured PeerSessionID from event: %d", e.SessionConfig.PeerSessionID)
+		}
+	}
+}
+
 // PPPoL2TP constants and structures
 const (
 	PX_PROTO_OL2TP = 0x00000002
@@ -121,18 +146,19 @@ const (
 	PPPIOCCONNECT = 0x4004743A
 )
 
-// sockaddr_pppol2tp represents the PPPoL2TP socket address structure for the kernel.
-// addr is sockaddr_in layout (16 bytes): sin_family, sin_port, sin_addr, sin_zero.
+// sockaddr_pppol2tp represents the PPPoL2TP socket address for connect(2).
+// Layout must match kernel: struct sockaddr_pppol2tp in if_pppox.h (sa_family, sa_protocol as unsigned int, then pppol2tp_addr).
+// See linux/include/uapi/linux/if_pppox.h and if_pppol2tp.h.
 type sockaddr_pppol2tp struct {
-	sa_family   uint16
-	sa_protocol uint16
+	sa_family   uint16   // 2 bytes
+	sa_protocol uint32   // 4 bytes (kernel: unsigned int), must not be uint16 or layout is wrong
+	pid         int32    // 0 => current process owns the fd
 	fd          int32
 	addr        [16]byte // sockaddr_in: family(2), port(2), ip(4), zero(8)
 	s_tunnel    uint16
 	s_session   uint16
 	d_tunnel    uint16
 	d_session   uint16
-	pad         [4]byte
 }
 
 // Client represents an L2TP client connection
@@ -150,7 +176,9 @@ type Client struct {
 	status     Status
 	tunnelCfg  *l2tp.TunnelConfig
 	sessionCfg *l2tp.SessionConfig
-	tunnelSock int // Tunnel socket FD for PPP connection
+	tunnelSock  int        // Tunnel socket FD for PPP connection (same as tunnelFile.Fd() when set)
+	tunnelFile  *os.File   // Keeps tunnel socket alive for library and PPPoL2TP; closed on disconnect
+	kernelL2TP  *kernelL2TP // Kernel L2TP tunnel/session for PPPoL2TP; nil if not used or failed
 }
 
 // Status represents the connection status
@@ -193,6 +221,7 @@ func NewClient(cfg *config.Config) (*Client, error) {
 		return nil, fmt.Errorf("failed to create L2TP context: %w", err)
 	}
 	client.l2tpCtx = l2tpCtx
+	client.l2tpCtx.RegisterEventHandler(&eventHandler{client: client})
 
 	// Create PPP manager
 	pppCfg := &ppp.PPPConfig{
@@ -221,59 +250,43 @@ func (c *Client) Connect() error {
 	serverAddr := c.cfg.GetServerAddress()
 	log.Printf("Connecting to L2TP server at %s", serverAddr)
 
-	// Create UDP socket for the tunnel
-	tunnelSock, err := c.createTunnelSocket(serverAddr)
+	// Create UDP socket for the tunnel; keep the file so the FD stays valid for library and PPPoL2TP
+	tunnelSock, tunnelFile, err := c.createTunnelSocket(serverAddr)
 	if err != nil {
 		return fmt.Errorf("failed to create tunnel socket: %w", err)
 	}
 
-	// Create tunnel configuration for L2TPv2 dynamic tunnel (client mode)
-	// Try to pass our socket FD if the config supports it
+	// Create tunnel configuration for L2TPv2 dynamic tunnel (client mode).
+	// Pass our socket FD when using local go-l2tp with Fd support (see go.mod replace).
 	tunnelCfg := &l2tp.TunnelConfig{
 		Version:      l2tp.ProtocolVersion2,
 		Encap:        l2tp.EncapTypeUDP,
 		Peer:         serverAddr,
 		HelloTimeout: time.Duration(c.cfg.HelloTimeout) * time.Second,
+		Fd:           tunnelSock,
 	}
-
-	// Try to set FD using reflection (try common field names)
-	tunnelCfgValue := reflect.ValueOf(tunnelCfg).Elem()
-	fdSet := false
-	for _, name := range []string{"FD", "Fd", "Socket", "Conn", "FileDescriptor"} {
-		fdField := tunnelCfgValue.FieldByName(name)
-		if fdField.IsValid() && fdField.CanSet() {
-			switch fdField.Kind() {
-			case reflect.Int, reflect.Int32, reflect.Int64:
-				fdField.SetInt(int64(tunnelSock))
-				fdSet = true
-				log.Printf("Set tunnel socket FD: %d (field %s)", tunnelSock, name)
-				break
-			case reflect.Uint, reflect.Uint32, reflect.Uint64:
-				fdField.SetUint(uint64(tunnelSock))
-				fdSet = true
-				log.Printf("Set tunnel socket FD: %d (field %s)", tunnelSock, name)
-				break
-			}
-		}
-		if fdSet {
-			break
-		}
-	}
-	if !fdSet {
-		log.Printf("TunnelConfig does not have FD field, using library-managed socket")
-		syscall.Close(tunnelSock)
+	fdSet := tunnelSock >= 0
+	if fdSet {
+		log.Printf("Using tunnel socket FD: %d (PPP-over-L2TP)", tunnelSock)
+	} else {
+		tunnelFile.Close()
+		tunnelFile = nil
 		tunnelSock = -1
 	}
 
 	// Create dynamic tunnel (L2TPv2 client mode)
 	tunnel, err := c.l2tpCtx.NewDynamicTunnel("l2tp-client-tunnel", tunnelCfg)
 	if err != nil {
+		if tunnelFile != nil {
+			tunnelFile.Close()
+		}
 		return fmt.Errorf("failed to create tunnel: %w", err)
 	}
 	c.mu.Lock()
 	c.tunnel = tunnel
 	c.tunnelCfg = tunnelCfg
 	c.tunnelSock = tunnelSock
+	c.tunnelFile = tunnelFile
 	c.mu.Unlock()
 
 	// Create session configuration
@@ -285,6 +298,9 @@ func (c *Client) Connect() error {
 	session, err := tunnel.NewSession("l2tp-client-session", sessionCfg)
 	if err != nil {
 		tunnel.Close()
+		if tunnelFile != nil {
+			tunnelFile.Close()
+		}
 		return fmt.Errorf("failed to create session: %w", err)
 	}
 	c.mu.Lock()
@@ -300,8 +316,12 @@ func (c *Client) Connect() error {
 		select {
 		case <-c.ctx.Done():
 			tunnel.Close()
+			if tunnelFile != nil {
+				tunnelFile.Close()
+			}
 			c.mu.Lock()
-			c.tunnel, c.session = nil, nil
+			c.tunnel, c.session, c.tunnelFile = nil, nil, nil
+			c.tunnelSock = -1
 			c.mu.Unlock()
 			return c.ctx.Err()
 		default:
@@ -309,15 +329,20 @@ func (c *Client) Connect() error {
 		c.readIDsFromConfig()
 		c.mu.Lock()
 		tid, sid := c.status.TunnelID, c.status.SessionID
+		peerTid, peerSid := c.status.RemoteTunnelID, c.status.RemoteSessionID
 		c.mu.Unlock()
-		if tid != 0 && sid != 0 {
+		if tid != 0 && sid != 0 && peerTid != 0 && peerSid != 0 {
 			break
 		}
 		select {
 		case <-c.ctx.Done():
 			tunnel.Close()
+			if tunnelFile != nil {
+				tunnelFile.Close()
+			}
 			c.mu.Lock()
-			c.tunnel, c.session = nil, nil
+			c.tunnel, c.session, c.tunnelFile = nil, nil, nil
+			c.tunnelSock = -1
 			c.mu.Unlock()
 			return c.ctx.Err()
 		case <-time.After(pollInterval):
@@ -333,10 +358,17 @@ func (c *Client) Connect() error {
 
 	if tunnelID == 0 || sessionID == 0 {
 		tunnel.Close()
+		if tunnelFile != nil {
+			tunnelFile.Close()
+		}
 		c.mu.Lock()
-		c.tunnel, c.session = nil, nil
+		c.tunnel, c.session, c.tunnelFile = nil, nil, nil
+		c.tunnelSock = -1
 		c.mu.Unlock()
 		return fmt.Errorf("tunnel/session establishment timeout: TunnelID=%d, SessionID=%d (IDs not available from library)", tunnelID, sessionID)
+	}
+	if peerTunnelID == 0 || peerSessionID == 0 {
+		log.Printf("Warning: peer IDs not yet available (PeerTunnelID=%d, PeerSessionID=%d); PPP socket may fail", peerTunnelID, peerSessionID)
 	}
 
 	// Update status and mark connected (so Disconnect/Close can tear down)
@@ -349,8 +381,17 @@ func (c *Client) Connect() error {
 
 	log.Printf("L2TP tunnel established: TunnelID=%d, SessionID=%d, PeerTunnelID=%d, PeerSessionID=%d", tunnelID, sessionID, peerTunnelID, peerSessionID)
 
-	// Create PPP socket only when we have non-zero IDs and valid tunnel FD
-	if c.tunnelSock != -1 {
+	// With LinuxNetlinkDataPlane, go-l2tp already registers the tunnel and session with the kernel
+	// when the control plane establishes (dp.NewTunnel / dp.NewSession). We must not register again
+	// or the kernel returns "file exists". Go straight to createPPPSocket() so PPPoL2TP connect()
+	// uses the kernel tunnel/session that go-l2tp created.
+
+	// Decide whether to create a real PPP interface or stay with the pty fallback based on config.
+	if !c.cfg.CreatePPPInterface {
+		log.Printf("Config: CreatePPPInterface=false; skipping PPPoL2TP device and using pty fallback")
+		c.pppManager.SetPtyPath("echo 'PPP interface creation disabled by config'")
+	} else if c.tunnelSock != -1 {
+		// Create PPP socket only when we have non-zero IDs and valid tunnel FD
 		pppDevice, err := c.createPPPSocket()
 		if err != nil {
 			log.Printf("Warning: failed to create PPP socket: %v", err)
@@ -387,26 +428,41 @@ func (c *Client) Disconnect() error {
 	pppMgr := c.pppManager
 	session := c.session
 	tunnel := c.tunnel
+	tunnelFile := c.tunnelFile
+	kl2tp := c.kernelL2TP
+	tid, sid := c.status.TunnelID, c.status.SessionID
 	c.connected = false
 	c.status.Connected = false
 	c.session = nil
 	c.tunnel = nil
+	c.tunnelFile = nil
+	c.tunnelSock = -1
+	c.kernelL2TP = nil
 	c.mu.Unlock()
 
 	log.Printf("Disconnecting from L2TP server")
 
 	// Run teardown with timeout so we never block forever (pppd or library Close can hang).
 	// Recover any panic from go-l2tp (e.g. "send on closed channel" during shutdown).
+	// Close tunnelFile only after tunnel/session close so the library can still use the FD to send CDN etc.
 	done := make(chan struct{})
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("Disconnect teardown: %v", r)
 			}
+			if tunnelFile != nil {
+				_ = tunnelFile.Close()
+			}
 			close(done)
 		}()
 		if pppMgr != nil {
 			_ = pppMgr.Stop()
+		}
+		if kl2tp != nil && tid != 0 {
+			_ = kl2tp.UnregisterSession(tid, sid)
+			_ = kl2tp.UnregisterTunnel(tid)
+			_ = kl2tp.Close()
 		}
 		if session != nil {
 			session.Close()
@@ -542,29 +598,25 @@ func (c *Client) readIDsFromConfig() {
 	}
 }
 
-// createTunnelSocket creates a UDP socket for the L2TP tunnel
-func (c *Client) createTunnelSocket(serverAddr string) (int, error) {
-	// Parse server address
+// createTunnelSocket creates a UDP socket for the L2TP tunnel.
+// Returns (fd, file, nil). The caller must keep file open for the FD to stay valid for the library and PPPoL2TP;
+// when not passing the FD to the library, the caller should close the file and use fd = -1.
+func (c *Client) createTunnelSocket(serverAddr string) (fd int, file *os.File, err error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", serverAddr)
 	if err != nil {
-		return -1, fmt.Errorf("failed to resolve server address: %w", err)
+		return -1, nil, fmt.Errorf("failed to resolve server address: %w", err)
 	}
-
-	// Create UDP socket
 	conn, err := net.DialUDP("udp", nil, udpAddr)
 	if err != nil {
-		return -1, fmt.Errorf("failed to create UDP socket: %w", err)
+		return -1, nil, fmt.Errorf("failed to create UDP socket: %w", err)
 	}
-	defer conn.Close()
-
-	// Get socket file descriptor
-	file, err := conn.File()
+	f, err := conn.File()
 	if err != nil {
-		return -1, fmt.Errorf("failed to get socket file: %w", err)
+		conn.Close()
+		return -1, nil, fmt.Errorf("failed to get socket file: %w", err)
 	}
-	defer file.Close()
-
-	return int(file.Fd()), nil
+	conn.Close() // file is a dup; socket stays open via f
+	return int(f.Fd()), f, nil
 }
 
 // createPPPSocket creates a PPPoL2TP socket and connects it to the L2TP session.
@@ -611,10 +663,11 @@ func (c *Client) createPPPSocket() (string, error) {
 	copy(addr[4:8], ip)
 	// addr[8:16] already zero
 
-	// Prepare sockaddr_pppol2tp structure
+	// Prepare sockaddr_pppol2tp structure (pid=0: current process owns the FD)
 	sax := sockaddr_pppol2tp{
 		sa_family:   AF_PPPOX,
 		sa_protocol: PX_PROTO_OL2TP,
+		pid:         0,
 		fd:          int32(c.tunnelSock),
 		addr:        addr,
 		s_tunnel:    uint16(tunnelID),
@@ -687,9 +740,15 @@ func (c *Client) Close() error {
 		c.mu.Lock()
 		tunnel := c.tunnel
 		session := c.session
+		tunnelFile := c.tunnelFile
 		c.tunnel = nil
 		c.session = nil
+		c.tunnelFile = nil
+		c.tunnelSock = -1
 		c.mu.Unlock()
+		if tunnelFile != nil {
+			_ = tunnelFile.Close()
+		}
 		// Don't hold lock during Close() - library can block or panic (e.g. "send on closed channel")
 		if tunnel != nil {
 			done := make(chan struct{})

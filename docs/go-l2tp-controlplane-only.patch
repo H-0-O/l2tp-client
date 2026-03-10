@@ -1,0 +1,13 @@
+--- a/l2tp/controlplane.go
++++ b/l2tp/controlplane.go
+@@ -11,7 +11,8 @@ type controlPlane struct
+ type controlPlane struct {
+ 	local, remote unix.Sockaddr
+ 	fd            int
+ 	file          *os.File
+ 	rc            syscall.RawConn
+ 	connected     bool
++	ownFd         bool // if true, close() closes the fd; if false, fd is owned by caller
+ }
+ 
+ func (cp *controlPlane) recvFrom(p []byte) (n int, addr unix.Sockaddr, err error) {

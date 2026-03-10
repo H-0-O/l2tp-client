@@ -5,9 +5,14 @@ go 1.21
 require (
 	github.com/go-kit/kit v0.13.0
 	github.com/katalix/go-l2tp v0.1.8
+	github.com/mdlayher/genetlink v1.3.2
+	github.com/mdlayher/netlink v1.7.2
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/viper v1.18.2
 )
+
+// Use local go-l2tp clone (e.g. with FD patch). Adjust path if your clone is elsewhere.
+replace github.com/katalix/go-l2tp => ../go-l2tp
 
 require (
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
@@ -18,8 +23,6 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/josharian/native v1.1.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
-	github.com/mdlayher/genetlink v1.3.2 // indirect
-	github.com/mdlayher/netlink v1.7.2 // indirect
 	github.com/mdlayher/socket v0.4.1 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.1.0 // indirect

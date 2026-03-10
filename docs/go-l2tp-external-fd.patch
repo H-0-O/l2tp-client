@@ -1,0 +1,14 @@
+--- a/l2tp/const.go
++++ b/l2tp/const.go
+@@ -190,6 +190,11 @@
+ 	// in the Framing Capabilities AVP per RFC2661.
+ 	// The default is to advertise both sync and async framing.
+ 	FramingCaps FramingCapability
++
++	// Fd, if > 0, is the file descriptor of an existing UDP socket to use for the tunnel.
++	// The caller must keep the FD valid and must not close it until the tunnel is closed.
++	// When set, the library does not close the FD on tunnel close (so the same FD can be used for PPPoL2TP).
++	Fd int
+ }
+ 
+ // SessionConfig encapsulates session configuration for a pseudowire

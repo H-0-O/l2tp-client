@@ -1,5 +1,6 @@
 # Binaries
 l2tp-client
+dist/
 *.exe
 *.exe~
 *.dll
